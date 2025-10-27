@@ -1,6 +1,6 @@
 use common::{ContactDto, Credentials, LoginResponse};
 use dprint_plugin_typescript::configuration::ConfigurationBuilder;
-use dprint_plugin_typescript::{format_text, FormatTextOptions};
+use dprint_plugin_typescript::{FormatTextOptions, format_text};
 use std::fs;
 use std::path::{Path, PathBuf};
 use ts_rs::TS;

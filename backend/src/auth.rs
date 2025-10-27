@@ -1,18 +1,18 @@
-use axum::{extract::State, http::StatusCode, Json};
-use bcrypt::{hash, verify, DEFAULT_COST};
+use axum::{Json, extract::State, http::StatusCode};
+use bcrypt::{DEFAULT_COST, hash, verify};
 use common::Credentials;
 use common::LoginResponse;
 use serde::{Deserialize, Serialize};
 
-use base64::engine::{general_purpose, Engine as _};
+use base64::engine::{Engine as _, general_purpose};
 use chrono::{Duration, Utc}; // Use chrono for time
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::RngCore; // Import RngCore for random token generation
 
 use axum::{extract::Request, middleware::Next, response::Response};
 use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
     TypedHeader,
+    headers::{Authorization, authorization::Bearer},
 };
 
 use crate::config::JwtConfig;

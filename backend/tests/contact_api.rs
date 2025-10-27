@@ -4,7 +4,7 @@ mod helpers;
 use crate::helpers::TEST_JWT_SECRET;
 use backend::auth::Claims;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use once_cell::sync::Lazy;
 use serde_json::json;
 

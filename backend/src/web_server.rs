@@ -1,12 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-    debug_handler,
+    Json, Router, debug_handler,
     extract::{Path, State},
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware,
     routing::{get, get_service, post},
-    Json, Router,
 };
 
 use crate::db::DbPool;
@@ -26,7 +25,7 @@ use crate::extractors::AuthUser;
 use crate::{auth, config::AppConfig};
 use common::ContactDto;
 
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 
 use common::Credentials;
 use common::LoginResponse;
@@ -133,7 +132,7 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/refresh", post(auth::refresh))
         // Apply the rate-limiting layer to public routes
         .layer(GovernorLayer::new(governor_conf));
-    
+
     // Protected routes that require authentication
     let protected_routes = Router::new()
         .route("/logout", post(auth::logout))

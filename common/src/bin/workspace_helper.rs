@@ -35,7 +35,9 @@ fn main() {
         print!("sqlite");
     } else {
         // Fallback if neither is found in the default features.
-        eprintln!("⚠️ Warning: Neither 'db-postgres' nor 'db-sqlite' found in default features of backend/Cargo.toml. Defaulting to sqlite.");
+        eprintln!(
+            "⚠️ Warning: Neither 'db-postgres' nor 'db-sqlite' found in default features of backend/Cargo.toml. Defaulting to sqlite."
+        );
         print!("sqlite");
     }
 
@@ -56,7 +58,9 @@ fn main() {
         print!("slint");
     } else {
         // Fallback if neither is found in the default features.
-        eprintln!("⚠️ Warning: Neither 'svelte-ui' nor 'slint-ui' found in default features of backend/Cargo.toml. Defaulting to svelte.");
+        eprintln!(
+            "⚠️ Warning: Neither 'svelte-ui' nor 'slint-ui' found in default features of backend/Cargo.toml. Defaulting to svelte."
+        );
         print!("svelte");
     }
 }
