@@ -132,10 +132,8 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/login", post(auth::login))
         .route("/refresh", post(auth::refresh))
         // Apply the rate-limiting layer to public routes
-        .layer(GovernorLayer {
-            config: governor_conf,
-        });
-
+        .layer(GovernorLayer::new(governor_conf));
+    
     // Protected routes that require authentication
     let protected_routes = Router::new()
         .route("/logout", post(auth::logout))

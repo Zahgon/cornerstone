@@ -33,7 +33,7 @@ pub struct User {
     pub password_hash: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: String,   // Subject (user id)
     pub exp: usize,    // Expiration time
@@ -160,7 +160,7 @@ pub async fn register(
     )
     .fetch_optional(&state.db_pool)
     .await
-    .map_err(|_| (AppError::InternalServerError("Database error".to_string())))?;
+    .map_err(|_| AppError::InternalServerError("Database error".to_string()))?;
 
     if existing_user.is_some() {
         return Err(AppError::Conflict(

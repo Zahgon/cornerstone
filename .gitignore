@@ -68,3 +68,6 @@ release/
 # Vite
 /frontend_svelte/vite.config.js.timestamp-*
 /frontend_svelte/vite.config.ts.timestamp-*
+
+# Stitch workspace (per-user)
+.stitchworkspace/local/
