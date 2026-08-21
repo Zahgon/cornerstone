@@ -27,14 +27,14 @@ The core philosophy is to provide a solid foundation with sane defaults for a co
 
 ## ✨ Key Features
 
-*   **Robust Backend**: Built on `axum` for ergonomic and modular web services, with `sqlx` for compile-time checked SQL queries.
+*   **Robust Backend**: Built on `actix-web` for ergonomic and modular web services, with `sqlx` for compile-time checked SQL queries.
 *   **Flexible Database**: Out-of-the-box support for **PostgreSQL** and **SQLite**, selectable via feature flags.
 *   **Dual Frontend Options**:
     *   **SvelteKit (Web)**: A modern, fast web framework for rich user interfaces, with type-safe API generation from your Rust code.
     *   **Slint (Desktop/WASM)**: A declarative UI toolkit for building native desktop applications in the same Rust ecosystem.
 *   **Secure Authentication**: A complete JWT-based authentication system with an access and refresh token rotation strategy.
 * **Automatic API Documentation**: Generated OpenAPI (Swagger) documentation via `utoipa` for easy API testing and exploration.
-* **API Rate Limiting**: Protects your application from abuse with configurable, per-IP rate limiting using `tower_governor`.
+* **API Rate Limiting**: Protects your application from abuse with configurable, per-IP rate limiting using `actix-governor`.
 *   **Developer-First Tooling**:
     *   **`just`**: A command runner for streamlined project tasks (build, test, run).
     *   **Docker**: Multi-stage `Dockerfile` and `docker-compose` for optimized, production-ready containers.
@@ -57,7 +57,7 @@ graph TD
     end
 
     subgraph Backend["⚙️ Backend (Rust)"]
-        Axum[Axum Web Server]
+        Actix[Actix Web Server]
         SQLx[SQLx Query Engine]
     end
 
@@ -68,9 +68,9 @@ graph TD
 
     User --> Svelte
     User --> Slint
-    Svelte <--> Axum
-    Slint <--> Axum
-    Axum --> SQLx
+    Svelte <--> Actix
+    Slint <--> Actix
+    Actix --> SQLx
     SQLx --> Postgres
     SQLx --> SQLite
 
@@ -80,7 +80,7 @@ graph TD
     classDef user fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
 
     class Svelte,Slint frontend
-    class Axum,SQLx backend
+    class Actix,SQLx backend
     class Postgres,SQLite database
     class User user
 ```
@@ -487,7 +487,7 @@ The project is a Cargo workspace with a clean separation of concerns.
 ```
 cornerstone/
 ├── .github/             # GitHub Actions CI workflows
-├── backend/             # The Rust Axum web server
+├── backend/             # The Rust Actix Web web server
 │   ├── migrations/      # SQLx database migrations
 │   ├── src/             # Backend source code
 │   └── static/          # Where the built frontend is served from

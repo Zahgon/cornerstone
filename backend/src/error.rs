@@ -1,8 +1,4 @@
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use serde_json::json;
 use thiserror::Error;
 use validator::ValidationErrors;
@@ -35,13 +31,27 @@ pub enum AppError {
     ValidationError(ValidationErrors),
 }
 
-// Implement IntoResponse to convert AppError into an HTTP response
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
+// Implement ResponseError to convert AppError into an HTTP response
+impl ResponseError for AppError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            AppError::InternalServerError(_) | AppError::DatabaseError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            AppError::JwtError(_) | AppError::PasswordError(_) | AppError::Unauthorized => {
+                StatusCode::UNAUTHORIZED
+            }
+            AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::ValidationError(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        }
+    }
+
+    fn error_response(&self) -> HttpResponse {
         let (status, error_message) = match self {
             AppError::InternalServerError(msg) => {
                 tracing::error!("Internal server error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
             }
             AppError::DatabaseError(e) => {
                 tracing::error!("Database error: {}", e);
@@ -59,23 +69,19 @@ impl IntoResponse for AppError {
                 (StatusCode::UNAUTHORIZED, "Invalid password".to_string())
             }
             // ... other error mappings ...
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()),
             AppError::NotFound => (StatusCode::NOT_FOUND, "Resource not found".to_string()),
             AppError::ValidationError(errors) => {
                 // The `errors` object contains detailed information on which fields failed.
                 // We can serialize this to JSON for a rich client-side error message.
                 let message = format!("Input validation failed: {errors}").replace('\n', ", ");
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": message, "details": errors })),
-                )
-                    .into_response();
+                return HttpResponse::build(StatusCode::UNPROCESSABLE_ENTITY)
+                    .json(json!({ "error": message, "details": errors }));
             } // Handle other variants...
         };
 
-        let body = Json(json!({ "error": error_message }));
-        (status, body).into_response()
+        HttpResponse::build(status).json(json!({ "error": error_message }))
     }
 }
 

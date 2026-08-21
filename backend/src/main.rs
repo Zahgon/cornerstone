@@ -6,6 +6,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use backend::config::AppConfig;
 use backend::db::DbPoolOptions;
 
+use actix_web::HttpServer;
 use tokio::signal;
 
 use std::env;
@@ -37,7 +38,7 @@ async fn shutdown_signal() {
     tracing::info!("signal received, starting graceful shutdown");
 }
 
-#[tokio::main]
+#[actix_web::main]
 async fn main() {
     // --- Setup ---
     // 1. Initialize structured logging
@@ -81,7 +82,8 @@ async fn main() {
     // --- Run Server ---
     // 3. Start the web server and pass it the state
     tracing::info!("Initializing server...");
-    let app = backend::web_server::create_router(app_state.clone());
+    let governor_conf = backend::web_server::create_governor_config(&config);
+    let server_state = app_state.clone();
 
     let ip_addr: IpAddr = config
         .web
@@ -92,14 +94,23 @@ async fn main() {
     let addr = SocketAddr::new(ip_addr, config.web.port);
     tracing::info!("Serving frontend and API at http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .unwrap();
+    let server = HttpServer::new(move || {
+        backend::web_server::create_app(server_state.clone(), governor_conf.clone())
+    })
+    // The shutdown is driven by `shutdown_signal` below instead of the built-in handlers
+    .disable_signals()
+    .bind(addr)
+    .unwrap()
+    .run();
+
+    let server_handle = server.handle();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        // `true` asks for a graceful shutdown of the workers
+        server_handle.stop(true).await;
+    });
+
+    server.await.unwrap();
 
     // This code runs after the server has stopped accepting new connections
     tracing::info!("Server shut down gracefully. Closing database connections.");

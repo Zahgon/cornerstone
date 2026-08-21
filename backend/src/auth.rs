@@ -1,4 +1,4 @@
-use axum::{Json, extract::State, http::StatusCode};
+use actix_web::{HttpResponse, web};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use common::Credentials;
 use common::LoginResponse;
@@ -9,11 +9,14 @@ use chrono::{Duration, Utc}; // Use chrono for time
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::RngCore; // Import RngCore for random token generation
 
-use axum::{extract::Request, middleware::Next, response::Response};
-use axum_extra::{
-    TypedHeader,
-    headers::{Authorization, authorization::Bearer},
+use actix_web::{
+    HttpMessage,
+    dev::{ServiceRequest, ServiceResponse},
+    error::ErrorBadRequest,
+    http::header::{self, Header as _},
+    middleware::Next,
 };
+use actix_web_httpauth::headers::authorization::{Authorization, Bearer};
 
 use crate::config::JwtConfig;
 use crate::error::AppError;
@@ -145,9 +148,11 @@ async fn issue_tokens(
     )
 )]
 pub async fn register(
-    State(state): State<AppState>,
-    Json(payload): Json<Credentials>,
-) -> Result<StatusCode, AppError> {
+    state: web::Data<AppState>,
+    payload: web::Json<Credentials>,
+) -> Result<HttpResponse, AppError> {
+    let payload = payload.into_inner();
+
     // Validate the incoming payload
     payload.validate()?;
 
@@ -187,7 +192,7 @@ pub async fn register(
         AppError::InternalServerError("Failed to create user".to_string())
     })?;
 
-    Ok(StatusCode::CREATED)
+    Ok(HttpResponse::Created().finish())
 }
 
 /// ## Login an existing user
@@ -203,9 +208,11 @@ pub async fn register(
     )
 )]
 pub async fn login(
-    State(state): State<AppState>,
-    Json(payload): Json<Credentials>,
-) -> Result<Json<LoginResponse>, AppError> {
+    state: web::Data<AppState>,
+    payload: web::Json<Credentials>,
+) -> Result<web::Json<LoginResponse>, AppError> {
+    let payload = payload.into_inner();
+
     // Validate the incoming payload
     payload.validate()?;
 
@@ -225,7 +232,7 @@ pub async fn login(
 
     let tokens = issue_tokens(user.id, &state.db_pool, &state.app_config.jwt, None).await?;
 
-    Ok(Json(tokens))
+    Ok(web::Json(tokens))
 }
 
 // --- Refresh Token Handler ---
@@ -239,9 +246,11 @@ pub async fn login(
     )
 )]
 pub async fn refresh(
-    State(state): State<AppState>,
-    Json(payload): Json<RefreshPayload>,
-) -> Result<Json<LoginResponse>, AppError> {
+    state: web::Data<AppState>,
+    payload: web::Json<RefreshPayload>,
+) -> Result<web::Json<LoginResponse>, AppError> {
+    let payload = payload.into_inner();
+
     // Hash the incoming refresh token to find it in the database.
     let mut hasher = Sha256::new();
     hasher.update(payload.refresh_token.as_bytes());
@@ -279,7 +288,7 @@ pub async fn refresh(
     )
     .await?;
 
-    Ok(Json(tokens))
+    Ok(web::Json(tokens))
 }
 
 // --- Logout Handler ---
@@ -294,25 +303,45 @@ pub async fn refresh(
         (status = 401, description = "Authentication required")
     )
 )]
-pub async fn logout(State(state): State<AppState>, user: AuthUser) -> Result<StatusCode, AppError> {
+pub async fn logout(state: web::Data<AppState>, user: AuthUser) -> Result<HttpResponse, AppError> {
     // Simply delete the refresh token from the database
     sqlx::query!("DELETE FROM refresh_tokens WHERE user_id = $1", user.id)
         .execute(&state.db_pool)
         .await?;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(HttpResponse::NoContent().finish())
 }
 
 // --- Middleware for JWT Authentication ---
 
-pub async fn auth_middleware(
-    State(state): State<AppState>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
-    mut request: Request, // Note: changed to mutable
-    next: Next,
-) -> Result<Response, AppError> {
+pub async fn auth_middleware<B>(
+    req: ServiceRequest, // Note: `ServiceRequest` already allows mutating the extensions
+    next: Next<B>,
+) -> Result<ServiceResponse<B>, actix_web::Error> {
+    // The application state is registered on the `App`, so it is always reachable here.
+    let state = req
+        .app_data::<web::Data<AppState>>()
+        .cloned()
+        .ok_or_else(|| {
+            AppError::InternalServerError(
+                "AppState not found in application data. Is the state missing?".to_string(),
+            )
+        })?;
+
+    // A missing header means the caller is not authenticated, while a header that is
+    // present but cannot be parsed as a bearer credential is a malformed request.
+    let auth_header = if req.headers().contains_key(header::AUTHORIZATION) {
+        Some(
+            Authorization::<Bearer>::parse(&req)
+                .map_err(|_| ErrorBadRequest("invalid HTTP header (authorization)"))?,
+        )
+    } else {
+        None
+    };
+
     let token = auth_header
         .ok_or(AppError::Unauthorized)?
+        .as_ref()
         .token()
         .to_owned();
 
@@ -340,14 +369,15 @@ pub async fn auth_middleware(
         user_id
     )
     .fetch_optional(&state.db_pool)
-    .await?
+    .await
+    .map_err(AppError::from)?
     .ok_or(AppError::Unauthorized)?; // User not found, token is for a deleted user
 
     // Add the authenticated user data to the request extensions
-    request.extensions_mut().insert(AuthUser {
+    req.extensions_mut().insert(AuthUser {
         id: user.id,
         email: user.email,
     });
 
-    Ok(next.run(request).await)
+    next.call(req).await
 }

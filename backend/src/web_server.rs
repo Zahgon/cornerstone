@@ -1,21 +1,28 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Once},
+    time::Duration,
+};
 
-use axum::{
-    Json, Router, debug_handler,
-    extract::{Path, State},
-    http::{HeaderValue, Method, StatusCode, header},
-    middleware,
-    routing::{get, get_service, post},
+use actix_web::{
+    App, Error, HttpResponse,
+    body::MessageBody,
+    dev::{ServiceFactory, ServiceRequest, ServiceResponse, fn_service},
+    error::{ErrorBadRequest, InternalError, JsonPayloadError},
+    http::{
+        Method, StatusCode,
+        header::{self, ContentType, HeaderName, HeaderValue},
+    },
+    middleware::{Next, from_fn},
+    web,
 };
 
 use crate::db::DbPool;
 use serde::Deserialize;
-use tower_http::{
-    cors::CorsLayer,
-    request_id::{MakeRequestUuid, SetRequestIdLayer},
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use std::io;
+
+use actix_cors::Cors;
+use actix_files::{Files, NamedFile};
+use tracing_actix_web::TracingLogger;
 
 use tracing;
 use validator::Validate;
@@ -25,7 +32,10 @@ use crate::extractors::AuthUser;
 use crate::{auth, config::AppConfig};
 use common::ContactDto;
 
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+use actix_governor::{
+    Governor, GovernorConfig, GovernorConfigBuilder, PeerIpKeyExtractor,
+    governor::middleware::NoOpMiddleware,
+};
 
 use common::Credentials;
 use common::LoginResponse;
@@ -65,45 +75,66 @@ pub struct AppState {
     pub app_config: AppConfig,
 }
 
-fn create_static_router() -> Router {
-    // This will cause a compilation error if neither `svelte-ui` nor `slint-ui` feature is enabled.
-    #[cfg(not(any(feature = "svelte-ui", feature = "slint-ui")))]
-    compile_error!("You must enable either the 'svelte-ui' or 'slint-ui' feature.");
+/// The rate limiter configuration shared by every worker of the HTTP server.
+pub type AppGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
 
-    // This code block will only be included if the `svelte-ui` feature is enabled
-    #[cfg(feature = "svelte-ui")]
-    let static_service = get_service(
-        ServeDir::new("backend/static/svelte-build")
-            .not_found_service(ServeFile::new("backend/static/svelte-build/index.html")),
-    )
-    .handle_error(|error| async move {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serve Svelte app: {error}"),
-        )
-    });
+// This will cause a compilation error if neither `svelte-ui` nor `slint-ui` feature is enabled.
+#[cfg(not(any(feature = "svelte-ui", feature = "slint-ui")))]
+compile_error!("You must enable either the 'svelte-ui' or 'slint-ui' feature.");
 
-    // This code block will only be included if the `slint-ui` feature is enabled
-    #[cfg(feature = "slint-ui")]
-    let static_service = get_service(
-        ServeDir::new("backend/static/slint-build")
-            .not_found_service(ServeFile::new("backend/static/slint-build/index.html")),
-    )
-    .handle_error(|error| async move {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serve Slint app: {error}"),
-        )
-    });
+// This code block will only be included if the `svelte-ui` feature is enabled
+#[cfg(feature = "svelte-ui")]
+const STATIC_DIR: &str = "backend/static/svelte-build";
+#[cfg(feature = "svelte-ui")]
+const STATIC_INDEX: &str = "backend/static/svelte-build/index.html";
+#[cfg(feature = "svelte-ui")]
+const STATIC_ERROR: &str = "Failed to serve Svelte app";
 
-    Router::new().fallback_service(static_service)
+// This code block will only be included if the `slint-ui` feature is enabled
+#[cfg(feature = "slint-ui")]
+const STATIC_DIR: &str = "backend/static/slint-build";
+#[cfg(feature = "slint-ui")]
+const STATIC_INDEX: &str = "backend/static/slint-build/index.html";
+#[cfg(feature = "slint-ui")]
+const STATIC_ERROR: &str = "Failed to serve Slint app";
+
+fn create_static_service() -> Files {
+    Files::new("/", STATIC_DIR)
+        .index_file("index.html")
+        // Keep the mime type of text files as guessed, without a charset suffix
+        .prefer_utf8(false)
+        // Everything in the build directory is public, including dotted paths
+        // such as `.well-known/`
+        .use_hidden_files()
+        // Anything that is not an existing file falls back to the SPA entry point,
+        // which is served with a `404 Not Found` status.
+        .default_handler(fn_service(|req: ServiceRequest| async move {
+            let (req, _) = req.into_parts();
+            let res = match NamedFile::open(STATIC_INDEX) {
+                Ok(file) => {
+                    let mut res = file.prefer_utf8(false).into_response(&req);
+                    *res.status_mut() = StatusCode::NOT_FOUND;
+                    res
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    HttpResponse::NotFound().finish()
+                }
+                Err(error) => {
+                    HttpResponse::InternalServerError().body(format!("{STATIC_ERROR}: {error}"))
+                }
+            };
+            Ok::<_, Error>(ServiceResponse::new(req, res))
+        }))
 }
 
-pub fn create_router(app_state: AppState) -> Router {
+/// Builds the rate limiter configuration and starts the background task that keeps
+/// its storage from growing indefinitely. It must be called once and the returned
+/// configuration shared with every worker.
+pub fn create_governor_config(app_config: &AppConfig) -> Arc<AppGovernorConfig> {
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(app_state.app_config.ratelimit.per_second)
-            .burst_size(app_state.app_config.ratelimit.burst_size)
+            .seconds_per_request(app_config.ratelimit.per_second)
+            .burst_size(app_config.ratelimit.burst_size)
             .finish()
             .unwrap(),
     );
@@ -124,75 +155,152 @@ pub fn create_router(app_state: AppState) -> Router {
         }
     });
 
-    // Public routes that do not require authentication
-    let public_routes = Router::new()
-        .route("/health", get(health_check))
-        .route("/register", post(auth::register))
-        .route("/login", post(auth::login))
-        .route("/refresh", post(auth::refresh))
-        // Apply the rate-limiting layer to public routes
-        .layer(GovernorLayer::new(governor_conf));
+    governor_conf
+}
 
-    // Protected routes that require authentication
-    let protected_routes = Router::new()
-        .route("/logout", post(auth::logout))
-        .route("/contacts", get(get_contacts).post(create_contact))
-        .route(
-            "/contacts/{id}",
-            get(get_contact).put(update_contact).delete(delete_contact),
+/// Adds an `x-request-id` header (a random UUID) to every incoming request that does
+/// not already carry one, so that it shows up in the traces produced below.
+async fn set_request_id<B>(
+    mut req: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<B>, Error> {
+    let request_id_header = HeaderName::from_static("x-request-id");
+
+    if !req.headers().contains_key(&request_id_header)
+        && let Ok(request_id) = HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
+    {
+        req.headers_mut().insert(request_id_header, request_id);
+    }
+
+    next.call(req).await
+}
+
+/// Rejections coming from the `Json` extractor: `422` when the body is valid JSON
+/// but does not match the target type, `415` when the content type is wrong, `413`
+/// when the body is over the size limit and `400` for everything else.
+fn create_json_config() -> web::JsonConfig {
+    web::JsonConfig::default().error_handler(|err, _req| {
+        let status = match &err {
+            JsonPayloadError::Deserialize(json_error)
+                if json_error.classify() == serde_json::error::Category::Data =>
+            {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            JsonPayloadError::ContentType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            JsonPayloadError::OverflowKnownLength { .. } | JsonPayloadError::Overflow { .. } => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
+            _ => StatusCode::BAD_REQUEST,
+        };
+
+        let message = err.to_string();
+        InternalError::from_response(
+            err,
+            HttpResponse::build(status)
+                .content_type(ContentType::plaintext())
+                .body(message),
         )
-        .route_layer(middleware::from_fn_with_state(
-            app_state.clone(),
-            auth::auth_middleware,
-        ));
+        .into()
+    })
+}
 
-    // Combine public and protected routes under the /api/v1 prefix
-    let api_routes = Router::new().merge(public_routes).merge(protected_routes);
+/// A path segment that cannot be deserialized is a malformed request, not a missing
+/// resource, so it is reported as `400 Bad Request`.
+fn create_path_config() -> web::PathConfig {
+    web::PathConfig::default().error_handler(|err, _req| ErrorBadRequest(err))
+}
 
-    let cors = CorsLayer::new()
-        .allow_origin(
-            app_state
-                .app_config
-                .web
-                .cors_origin
-                .parse::<HeaderValue>()
-                .expect("Invalid CORS_ORIGIN in config.toml"),
-        )
+pub fn create_app(
+    app_state: AppState,
+    governor_conf: Arc<AppGovernorConfig>,
+) -> App<
+    impl ServiceFactory<
+        ServiceRequest,
+        Config = (),
+        Response = ServiceResponse<impl MessageBody>,
+        Error = Error,
+        InitError = (),
+    >,
+> {
+    let cors = Cors::default()
+        .allowed_origin(&app_state.app_config.web.cors_origin)
         // It's good practice to be specific about allowed methods and headers
-        .allow_methods([
+        .allowed_methods([
             Method::GET,
             Method::POST,
             Method::PUT,
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allowed_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
         // This is required to allow the browser to send credentials (e.g., cookies, auth tokens)
-        .allow_credentials(true);
+        .supports_credentials();
 
-    let mut router = Router::new();
+    let mut app = App::new()
+        .app_data(web::Data::new(app_state))
+        .app_data(create_json_config())
+        .app_data(create_path_config());
 
     if cfg!(debug_assertions) {
-        tracing::info!("Debug mode: Enabling /docs endpoint");
-        router =
-            router.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
+        // `create_app` is the per-worker factory, this notice is emitted once
+        static DOCS_NOTICE: Once = Once::new();
+        DOCS_NOTICE.call_once(|| tracing::info!("Debug mode: Enabling /docs endpoint"));
+
+        app = app
+            // Keeps `/docs` reachable, the UI itself is mounted under `/docs/`
+            .service(web::redirect("/docs", "/docs/").see_other())
+            .service(
+                SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", ApiDoc::openapi()),
+            );
     }
 
-    router
-        .nest("/api/v1", api_routes) // Nest all API routes under /api/v1
-        .fallback_service(create_static_router())
-        .with_state(app_state)
-        .layer(
-            TraceLayer::new_for_http()
-                // Add this layer to add a request ID to all traces
-                .make_span_with(tower_http::trace::DefaultMakeSpan::new().include_headers(true))
-                .on_response(tower_http::trace::DefaultOnResponse::new().include_headers(true)),
+    app
+        // Public routes that do not require authentication.
+        // The rate-limiting middleware is applied to each of them.
+        .service(
+            web::resource("/api/v1/health")
+                .wrap(Governor::new(&governor_conf))
+                .route(web::get().to(health_check)),
         )
-        .layer(SetRequestIdLayer::new(
-            "x-request-id".parse().unwrap(),
-            MakeRequestUuid,
-        )) // This line adds the request ID
-        .layer(cors)
+        .service(
+            web::resource("/api/v1/register")
+                .wrap(Governor::new(&governor_conf))
+                .route(web::post().to(auth::register)),
+        )
+        .service(
+            web::resource("/api/v1/login")
+                .wrap(Governor::new(&governor_conf))
+                .route(web::post().to(auth::login)),
+        )
+        .service(
+            web::resource("/api/v1/refresh")
+                .wrap(Governor::new(&governor_conf))
+                .route(web::post().to(auth::refresh)),
+        )
+        // Protected routes that require authentication
+        .service(
+            web::resource("/api/v1/logout")
+                .wrap(from_fn(auth::auth_middleware))
+                .route(web::post().to(auth::logout)),
+        )
+        .service(
+            web::resource("/api/v1/contacts")
+                .wrap(from_fn(auth::auth_middleware))
+                .route(web::get().to(get_contacts))
+                .route(web::post().to(create_contact)),
+        )
+        .service(
+            web::resource("/api/v1/contacts/{id}")
+                .wrap(from_fn(auth::auth_middleware))
+                .route(web::get().to(get_contact))
+                .route(web::put().to(update_contact))
+                .route(web::delete().to(delete_contact)),
+        )
+        // Registered last so that it only handles what the routes above did not match
+        .service(create_static_service())
+        .wrap(TracingLogger::default())
+        .wrap(from_fn(set_request_id)) // This line adds the request ID
+        .wrap(cors)
 }
 // --- API Handlers ---
 
@@ -203,9 +311,8 @@ pub fn create_router(app_state: AppState) -> Router {
         (status = 200, description = "Service is healthy")
     )
 )]
-#[debug_handler]
-async fn health_check() -> StatusCode {
-    StatusCode::OK
+async fn health_check() -> HttpResponse {
+    HttpResponse::Ok().finish()
 }
 
 #[utoipa::path(
@@ -221,12 +328,13 @@ async fn health_check() -> StatusCode {
         (status = 422, description = "Validation error"),
     )
 )]
-#[debug_handler]
 async fn create_contact(
-    State(state): State<AppState>,
+    state: web::Data<AppState>,
     user: AuthUser,
-    Json(new_contact_dto): Json<ContactDto>,
-) -> Result<(StatusCode, Json<ContactDto>), AppError> {
+    new_contact_dto: web::Json<ContactDto>,
+) -> Result<HttpResponse, AppError> {
+    let new_contact_dto = new_contact_dto.into_inner();
+
     tracing::info!(
         "Creating contact: {:?}, assigned to user {}",
         new_contact_dto,
@@ -254,7 +362,7 @@ async fn create_contact(
     .await;
 
     match result {
-        Ok(created_contact) => Ok((StatusCode::CREATED, Json(created_contact))),
+        Ok(created_contact) => Ok(HttpResponse::Created().json(created_contact)),
         Err(e) => {
             tracing::error!("Failed to create contact: {}", e);
             Err(AppError::InternalServerError(
@@ -279,12 +387,13 @@ async fn create_contact(
         (status = 401, description = "Authentication required")
     )
 )]
-#[debug_handler]
 async fn get_contact(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
+    state: web::Data<AppState>,
+    id: web::Path<i64>,
     user: AuthUser,
-) -> Result<Json<ContactDto>, AppError> {
+) -> Result<web::Json<ContactDto>, AppError> {
+    let id = id.into_inner();
+
     tracing::info!(
         "Fetching single contact with id: {} for user {}",
         id,
@@ -301,7 +410,7 @@ async fn get_contact(
     .await;
 
     match result {
-        Ok(Some(contact)) => Ok(Json(contact)),
+        Ok(Some(contact)) => Ok(web::Json(contact)),
         Ok(None) => Err(AppError::NotFound),
         Err(e) => {
             tracing::error!("Failed to fetch contact: {}", e);
@@ -329,12 +438,13 @@ pub struct Pagination {
         (status = 401, description = "Authentication required")
     )
 )]
-#[debug_handler]
 async fn get_contacts(
-    State(state): State<AppState>,
+    state: web::Data<AppState>,
     user: AuthUser,
-    axum::extract::Query(pagination): axum::extract::Query<Pagination>, // <-- Add this
-) -> Result<Json<Vec<ContactDto>>, AppError> {
+    pagination: web::Query<Pagination>, // <-- Add this
+) -> Result<web::Json<Vec<ContactDto>>, AppError> {
+    let pagination = pagination.into_inner();
+
     // Set default values for pagination
     let page = pagination.page.unwrap_or(1) as i64;
     let per_page = pagination.per_page.unwrap_or(20) as i64;
@@ -362,7 +472,7 @@ async fn get_contacts(
 
     // ... rest of the handler remains the same
     match result {
-        Ok(contacts) => Ok(Json(contacts)),
+        Ok(contacts) => Ok(web::Json(contacts)),
         Err(e) => {
             tracing::error!("Failed to fetch contacts: {}", e);
             Err(AppError::InternalServerError(
@@ -389,13 +499,15 @@ async fn get_contacts(
         (status = 422, description = "Validation error"),
     )
 )]
-#[debug_handler]
 async fn update_contact(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
+    state: web::Data<AppState>,
+    id: web::Path<i64>,
     user: AuthUser,
-    Json(updated_contact): Json<ContactDto>,
-) -> Result<Json<ContactDto>, AppError> {
+    updated_contact: web::Json<ContactDto>,
+) -> Result<web::Json<ContactDto>, AppError> {
+    let id = id.into_inner();
+    let updated_contact = updated_contact.into_inner();
+
     tracing::info!("Updating contact with id: {} for user {}", id, user.id);
 
     updated_contact.validate()?;
@@ -420,7 +532,7 @@ async fn update_contact(
     .await;
 
     match result {
-        Ok(Some(contact)) => Ok(Json(contact)),
+        Ok(Some(contact)) => Ok(web::Json(contact)),
         Ok(None) => Err(AppError::NotFound),
         Err(e) => {
             tracing::error!("Failed to update contact: {}", e);
@@ -445,12 +557,13 @@ async fn update_contact(
         (status = 404, description = "Contact not found"),
     )
 )]
-#[debug_handler]
 async fn delete_contact(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
+    state: web::Data<AppState>,
+    id: web::Path<i64>,
     user: AuthUser,
-) -> Result<StatusCode, AppError> {
+) -> Result<HttpResponse, AppError> {
+    let id = id.into_inner();
+
     tracing::info!("Deleting contact with id: {} for user {}", id, user.id);
 
     let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND user_id = $2")
@@ -462,7 +575,7 @@ async fn delete_contact(
     match result {
         Ok(execution_result) => {
             if execution_result.rows_affected() > 0 {
-                Ok(StatusCode::NO_CONTENT)
+                Ok(HttpResponse::NoContent().finish())
             } else {
                 // Use NotFound to prevent leaking information about which contacts exist
                 Err(AppError::NotFound)

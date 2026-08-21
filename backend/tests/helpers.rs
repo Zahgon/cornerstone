@@ -1,3 +1,4 @@
+use actix_web::HttpServer;
 use backend::config::{JwtConfig, RateLimitConfig, WebConfig};
 use backend::db::DbPool;
 use backend::db::DbPoolOptions;
@@ -5,17 +6,14 @@ use backend::{config::AppConfig, web_server::AppState};
 use common::{Credentials, LoginResponse};
 use reqwest::StatusCode;
 use sqlx::Executor;
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 
 pub const TEST_JWT_SECRET: &str = "test_secret";
 
 /// Spawn a test server and return the address and a reqwest client.
 pub async fn spawn_app() -> (SocketAddr, reqwest::Client, DbPool) {
     // The listener is bound to a random available port.
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind random port");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let addr = listener.local_addr().unwrap();
 
     // Load .env file for database URLs, especially for local Postgres tests.
@@ -115,20 +113,22 @@ pub async fn spawn_app() -> (SocketAddr, reqwest::Client, DbPool) {
     };
 
     // --- Common App Setup ---
+    let governor_conf = backend::web_server::create_governor_config(&config);
+
     let app_state = AppState {
         db_pool: db_pool.clone(),
         app_config: config,
     };
 
-    let app = backend::web_server::create_router(app_state);
+    let server = HttpServer::new(move || {
+        backend::web_server::create_app(app_state.clone(), governor_conf.clone())
+    })
+    .listen(listener)
+    .unwrap()
+    .run();
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap();
+    actix_web::rt::spawn(async move {
+        server.await.unwrap();
     });
 
     let client = reqwest::Client::builder()
