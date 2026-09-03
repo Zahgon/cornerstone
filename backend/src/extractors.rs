@@ -1,5 +1,6 @@
-use crate::{error::AppError, web_server::AppState};
-use axum::{extract::FromRequestParts, http::request::Parts};
+use crate::error::AppError;
+use actix_web::{FromRequest, HttpMessage, HttpRequest, dev::Payload};
+use std::future::{Ready, ready};
 
 // The struct is the same
 #[derive(Clone, Debug)]
@@ -9,22 +10,20 @@ pub struct AuthUser {
 }
 
 // But the extractor logic changes completely
-impl FromRequestParts<AppState> for AuthUser {
-    type Rejection = AppError;
+impl FromRequest for AuthUser {
+    type Error = AppError;
+    type Future = Ready<Result<Self, Self::Error>>;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         // The middleware is responsible for putting AuthUser in extensions.
         // If it's not there, it's a 500 Internal Server Error because
         // the middleware should have been run.
-        let user = parts.extensions.get::<AuthUser>().ok_or_else(|| {
+        let user = req.extensions().get::<AuthUser>().cloned();
+
+        ready(user.ok_or_else(|| {
             AppError::InternalServerError(
                 "AuthUser not found in request extensions. Is the auth middleware missing?".into(),
             )
-        })?;
-
-        Ok(user.clone())
+        }))
     }
 }

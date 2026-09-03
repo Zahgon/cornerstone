@@ -20,7 +20,7 @@ path = "src/bin/workspace_helper.rs"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 validator = { workspace = true, features = ["derive"] }
-utoipa = { workspace = true, features = ["axum_extras", "chrono"] }
+utoipa = { workspace = true, features = ["actix_extras", "chrono"] }
 toml = { workspace = true }
 
 # ts-rs as an optional dependency for the svelte UI

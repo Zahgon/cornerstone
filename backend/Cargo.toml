@@ -8,18 +8,20 @@ repository.workspace = true
 
 
 [dependencies]
-axum = { workspace = true, features = ["macros"] }
+actix-web = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
 reqwest = { workspace = true, features = ["json"] }
 chrono = { workspace = true }
-tower-http = { workspace = true, features = ["fs", "cors", "trace", "request-id"] }
+actix-cors = { workspace = true }
+actix-files = { workspace = true }
 common = { workspace = true }
 tracing = { workspace = true }
+tracing-actix-web = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
 anyhow = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "macros", "chrono", "migrate"] }
-axum-extra = { workspace = true, features = ["typed-header"] }
+actix-web-httpauth = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -31,10 +33,10 @@ rand = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-tower_governor = { workspace = true }
+actix-governor = { workspace = true }
 thiserror = { workspace = true }
-utoipa = { workspace = true, features = ["axum_extras", "chrono", "openapi_extensions"] }
-utoipa-swagger-ui = { workspace = true, features = ["axum"] }
+utoipa = { workspace = true, features = ["actix_extras", "chrono", "openapi_extensions"] }
+utoipa-swagger-ui = { workspace = true, features = ["actix-web"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [features]
@@ -51,12 +53,6 @@ path = "src/lib.rs"
 [dev-dependencies]
 # Dependencies needed ONLY for running tests and benchmarks
 
-# For making test requests and handling response bodies
-hyper = { workspace = true, features = ["full"] }
-# For collecting the response body into bytes.
-http-body-util = { workspace = true }
 # For deserializing JSON in our tests
 serde_json = { workspace = true }
-# For the `ServiceExt::oneshot` testing utility
-tower = { workspace = true, features = ["full"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "postgres", "macros"] }

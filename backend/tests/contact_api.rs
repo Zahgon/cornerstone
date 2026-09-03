@@ -13,7 +13,7 @@ static TRACING: Lazy<()> = Lazy::new(|| {
     subscriber.init();
 });
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_register_login_logout_flow() {
     Lazy::force(&TRACING);
 
@@ -125,7 +125,7 @@ async fn test_register_login_logout_flow() {
     );
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_token_refresh() {
     Lazy::force(&TRACING);
     let (addr, client, _db_pool) = helpers::spawn_app().await;
@@ -196,7 +196,7 @@ async fn test_token_refresh() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_contacts_crud_flow() {
     Lazy::force(&TRACING);
 
@@ -304,7 +304,7 @@ async fn test_contacts_crud_flow() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_contacts_authorization() {
     Lazy::force(&TRACING);
 
@@ -436,7 +436,7 @@ async fn test_contacts_authorization() {
     );
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_protected_routes_require_auth() {
     Lazy::force(&TRACING);
 
@@ -484,7 +484,7 @@ async fn test_protected_routes_require_auth() {
     }
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_invalid_and_expired_tokens() {
     Lazy::force(&TRACING);
 
@@ -553,7 +553,7 @@ async fn test_invalid_and_expired_tokens() {
     );
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_validation_errors() {
     Lazy::force(&TRACING);
     let (addr, client, _db_pool) = helpers::spawn_app().await;
@@ -617,7 +617,7 @@ async fn test_validation_errors() {
     );
 }
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_contacts_pagination() {
     Lazy::force(&TRACING);
     let (addr, client, _db_pool) = helpers::spawn_app().await;
